@@ -19,37 +19,78 @@ class WebSocketServer {
           ws.close(1008, 'Authentication required');
           return;
         }
-
-        // Verify token and get user
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const user = await User.findById(decoded.id);
-        if (!user) {
-          ws.close(1008, 'User not found');
+  
+        try {
+          // Verify token and get user with proper error handling
+          const decoded = jwt.verify(token, process.env.JWT_SECRET);
+          const user = await User.findById(decoded.id);
+          if (!user) {
+            ws.close(1008, 'User not found');
+            return;
+          }
+  
+          ws.userId = user._id;
+          ws.userName = user.name;
+          // Store token expiration for refresh management
+          ws.tokenExp = decoded.exp;
+  
+          // Set up ping/pong for connection health
+          ws.isAlive = true;
+          ws.on('pong', () => {
+            ws.isAlive = true;
+          });
+  
+          // Handle incoming messages
+          ws.on('message', async (message) => {
+            try {
+              // Check token expiration
+              if (ws.tokenExp * 1000 < Date.now()) {
+                ws.close(1008, 'Token expired');
+                return;
+              }
+              
+              const data = JSON.parse(message);
+              await this.handleMessage(ws, data);
+            } catch (error) {
+              console.error('Error handling message:', error);
+              ws.send(JSON.stringify({
+                type: 'ERROR',
+                message: 'Failed to process message'
+              }));
+            }
+          });
+  
+          // Handle client disconnect
+          ws.on('close', () => {
+            this.handleDisconnect(ws);
+          });
+          
+        } catch (jwtError) {
+          console.error('JWT verification failed:', jwtError);
+          ws.close(1008, 'Authentication failed: Invalid or expired token');
           return;
         }
-
-        ws.userId = user._id;
-        ws.userName = user.name;
-
-        // Handle incoming messages
-        ws.on('message', async (message) => {
-          try {
-            const data = JSON.parse(message);
-            await this.handleMessage(ws, data);
-          } catch (error) {
-            console.error('Error handling message:', error);
-          }
-        });
-
-        // Handle client disconnect
-        ws.on('close', () => {
-          this.handleDisconnect(ws);
-        });
       } catch (error) {
         console.error('WebSocket connection error:', error);
         ws.close(1008, 'Authentication failed');
       }
     });
+    
+    // Set up interval to check for dead connections
+    this.pingInterval = setInterval(() => {
+      this.wss.clients.forEach(ws => {
+        if (ws.isAlive === false) {
+          return ws.terminate();
+        }
+        ws.isAlive = false;
+        ws.ping(() => {});
+      });
+    }, 30000);
+  }  
+  // Clean up interval on server shutdown
+  close() {
+    clearInterval(this.pingInterval);
+    this.wss.close();
   }
 
   async handleMessage(ws, data) {
@@ -211,15 +252,42 @@ class WebSocketServer {
     });
   }
 
-  handleDisconnect(ws) {
-    // Remove connection from all workspaces
-    for (const [key, connections] of this.taskWorkspaces.entries()) {
-      if (connections.has(ws)) {
-        connections.delete(ws);
-        if (connections.size === 0) {
-          this.taskWorkspaces.delete(key);
+  async handleDisconnect(ws) {
+    try {
+      // Update user status in any active workspaces
+      for (const [key, connections] of this.taskWorkspaces.entries()) {
+        if (connections.has(ws)) {
+          // Extract projectId and taskId from key
+          const [projectId, taskId] = key.split('-');
+          
+          // Update collaborator status in database
+          const project = await Project.findById(projectId);
+          if (project) {
+            const task = project.tasks.id(taskId);
+            if (task && task.workspace && task.workspace.collaborators) {
+              // Remove user from active collaborators
+              task.workspace.collaborators = task.workspace.collaborators.filter(
+                collab => !collab.user.equals(ws.userId)
+              );
+              await project.save();
+              
+              // Notify other users
+              this.broadcastToWorkspace(key, {
+                type: 'COLLABORATOR_LEFT',
+                userId: ws.userId
+              }, ws);
+            }
+          }
+          
+          // Remove from connection pool
+          connections.delete(ws);
+          if (connections.size === 0) {
+            this.taskWorkspaces.delete(key);
+          }
         }
       }
+    } catch (error) {
+      console.error('Error handling disconnect:', error);
     }
   }
 

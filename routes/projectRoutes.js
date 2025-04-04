@@ -16,6 +16,7 @@ router.delete('/:projectId', projectController.deleteProject);
 // Project member management
 router.post('/:projectId/invite', projectController.inviteMember);
 router.post('/accept-invitation/:token', projectController.acceptInvitation);
+router.post('/decline-invitation/:token', projectController.declineInvitation); // Add this line
 
 // Task management
 router.post('/:projectId/tasks', projectController.createTask);

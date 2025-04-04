@@ -302,6 +302,43 @@ exports.acceptInvitation = async (req, res) => {
   }
 };
 
+// Decline project invitation
+exports.declineInvitation = async (req, res) => {
+  try {
+    const { token } = req.params;
+    const project = await Project.findOne({
+      'pendingInvites.token': token,
+      'pendingInvites.expiresAt': { $gt: Date.now() }
+    });
+
+    if (!project) {
+      throw new Error('Invalid or expired invitation');
+    }
+
+    const invite = project.pendingInvites.find(inv => inv.token === token);
+    if (invite.email !== req.user.email) {
+      throw new Error('Invitation is not for this user');
+    }
+
+    // Remove the invitation from pendingInvites
+    project.pendingInvites = project.pendingInvites.filter(
+      inv => inv.token !== token
+    );
+
+    await project.save();
+
+    res.status(200).json({
+      status: 'success',
+      message: 'Invitation declined successfully'
+    });
+  } catch (err) {
+    res.status(400).json({
+      status: 'error',
+      message: err.message
+    });
+  }
+};
+
 // Create task
 exports.createTask = async (req, res) => {
   try {

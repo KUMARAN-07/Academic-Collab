@@ -14,18 +14,19 @@ const signToken = (id) => {
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST,
   port: process.env.EMAIL_PORT,
-  secure: false,
+  secure: process.env.EMAIL_PORT === 465,
   auth: {
     user: process.env.EMAIL_USERNAME,
     pass: process.env.EMAIL_PASSWORD
   },
   tls: {
-    ciphers: 'SSLv3'
+    minVersion: 'TLSv1.2'
   }
 });
 
 // Send verification email
-const sendVerificationEmail = async (user, verificationUrl) => {
+const sendVerificationEmail = async (user, verificationToken) => {
+  // Create a signed verification token instead of exposing raw token in URL
   const mailOptions = {
     from: process.env.EMAIL_FROM,
     to: user.email,
@@ -33,12 +34,61 @@ const sendVerificationEmail = async (user, verificationUrl) => {
     html: `
       <h1>Welcome to Academic Collab!</h1>
       <p>Please click the link below to verify your email address:</p>
-      <a href="${verificationUrl}">Verify Email</a>
+      <a href="${process.env.CLIENT_URL}/verify-email?token=${verificationToken}&id=${user._id}">Verify Email</a>
       <p>This link will expire in 24 hours.</p>
+      <p>If you did not create this account, please ignore this email.</p>
     `
   };
 
   await transporter.sendMail(mailOptions);
+};
+
+// Updated verify email endpoint
+exports.verifyEmail = async (req, res) => {
+  try {
+    const { token, id } = req.query;
+    
+    if (!token || !id) {
+      throw new Error('Verification token and user ID are required');
+    }
+
+    const hashedToken = crypto
+      .createHash('sha256')
+      .update(token)
+      .digest('hex');
+
+    const user = await User.findOne({
+      _id: id,
+      emailVerificationToken: hashedToken,
+      emailVerificationExpires: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      throw new Error('Token is invalid or has expired. Please request a new verification email.');
+    }
+
+    if (user.isEmailVerified) {
+      return res.status(200).json({
+        status: 'success',
+        message: 'Email is already verified'
+      });
+    }
+
+    user.isEmailVerified = true;
+    user.emailVerificationToken = undefined;
+    user.emailVerificationExpires = undefined;
+    await user.save({ validateBeforeSave: false });
+
+    res.status(200).json({
+      status: 'success',
+      message: 'Email verified successfully'
+    });
+  } catch (err) {
+    res.status(400).json({
+      status: 'error',
+      message: err.message
+    });
+  }
 };
 
 // Send password reset email
@@ -122,48 +172,6 @@ exports.login = async (req, res) => {
     });
   } catch (err) {
     res.status(401).json({
-      status: 'error',
-      message: err.message
-    });
-  }
-};
-
-// Verify email
-exports.verifyEmail = async (req, res) => {
-  try {
-    if (!req.params.token) {
-      throw new Error('Verification token is required');
-    }
-
-    const hashedToken = crypto
-      .createHash('sha256')
-      .update(req.params.token)
-      .digest('hex');
-
-    const user = await User.findOne({
-      emailVerificationToken: hashedToken,
-      emailVerificationExpires: { $gt: Date.now() }
-    });
-
-    if (!user) {
-      throw new Error('Token is invalid or has expired. Please request a new verification email.');
-    }
-
-    if (user.isEmailVerified) {
-      throw new Error('Email is already verified');
-    }
-
-    user.isEmailVerified = true;
-    user.emailVerificationToken = undefined;
-    user.emailVerificationExpires = undefined;
-    await user.save({ validateBeforeSave: false });
-
-    res.status(200).json({
-      status: 'success',
-      message: 'Email verified successfully'
-    });
-  } catch (err) {
-    res.status(400).json({
       status: 'error',
       message: err.message
     });
